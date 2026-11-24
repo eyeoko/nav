@@ -209,9 +209,6 @@ jobs:
     steps:
       - name: Setup Pages
         uses: actions/configure-pages@1f0c5cde4bc74cd7e1254d0cb4de8d49e9068c7d # v4
-        with:
-          # 仓库未手动启用 Pages 时自动启用（否则 Get Pages site failed）
-          enablement: true
 
       - name: Deploy to GitHub Pages
         id: deployment

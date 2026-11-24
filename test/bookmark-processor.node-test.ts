@@ -339,6 +339,77 @@ test('inferBookmarkIcon：子域专属图标优先于父域（长度降序）', 
   assert.equal(inferBookmarkIcon('https://unknown-example.com/'), 'fas fa-link');
 });
 
+test('filterHttpSites：过滤 chrome://、javascript: 等不安全书签并剪掉空分类', () => {
+  const { filterHttpSites } = require('../src/bookmark-processor.ts');
+  const result = filterHttpSites([
+    {
+      name: '工具',
+      icon: 'fas fa-folder',
+      sites: [
+        { name: 'GitHub', url: 'https://github.com/', icon: 'fab fa-github', description: '' },
+        {
+          name: 'Chrome 任务',
+          url: 'chrome://contextual-tasks/?q=1',
+          icon: 'fas fa-link',
+          description: '',
+        },
+        {
+          name: '剪藏脚本',
+          url: 'javascript:(function(){return 1})()',
+          icon: 'fas fa-link',
+          description: '',
+        },
+      ],
+      subcategories: [
+        {
+          name: '只剩坏链接',
+          icon: 'fas fa-folder',
+          sites: [
+            { name: '设置', url: 'chrome://settings/', icon: 'fas fa-link', description: '' },
+          ],
+        },
+        {
+          name: '嵌套保留',
+          icon: 'fas fa-folder',
+          groups: [
+            {
+              name: '深层',
+              icon: 'fas fa-folder',
+              sites: [
+                {
+                  name: 'Docs',
+                  url: 'http://docs.example.com/',
+                  icon: 'fas fa-link',
+                  description: '',
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+  ]);
+
+  assert.equal(result.removed, 3);
+  assert.equal(result.categories.length, 1);
+  const tools = result.categories[0];
+  assert.equal(tools.sites.length, 1);
+  assert.equal(tools.sites[0].name, 'GitHub');
+  assert.equal(tools.subcategories.length, 1);
+  assert.equal(tools.subcategories[0].name, '嵌套保留');
+  assert.equal(tools.subcategories[0].groups[0].sites[0].name, 'Docs');
+  // 全被过滤时应返回空分类列表
+  const empty = filterHttpSites([
+    {
+      name: 'X',
+      icon: 'i',
+      sites: [{ name: 'a', url: 'javascript:alert(1)', icon: 'i', description: '' }],
+    },
+  ]);
+  assert.equal(empty.removed, 1);
+  assert.equal(empty.categories.length, 0);
+});
+
 test('upsertBookmarksNavInSiteYml：flow 风格 navigation（含换行）返回诊断且不改文件', () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'menav-flow-test-'));
   const filePath = path.join(tmp, 'site.yml');

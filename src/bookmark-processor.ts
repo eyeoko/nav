@@ -26,6 +26,16 @@ const { ensureUserConfigInitialized, ensureUserSiteYmlExists } =
 const { parseBookmarks } = require('./lib/bookmarks/parser.ts') as {
   parseBookmarks: (htmlContent: string) => BookmarksData;
 };
+const { sanitizeUrl } = require('./shared/sanitize-url.ts') as {
+  sanitizeUrl: (
+    raw: unknown,
+    options?: { allowedSchemes?: unknown; label?: string }
+  ) => string | null;
+};
+const prettier = require('prettier') as {
+  format: (source: string, options?: Record<string, unknown>) => Promise<string>;
+  resolveConfig: (filepath: string) => Promise<Record<string, unknown> | null>;
+};
 const { generateBookmarksYaml: serializeBookmarksYaml } =
   require('./lib/bookmarks/serializer.ts') as {
     generateBookmarksYaml: (bookmarks: BookmarksData) => string | null;
@@ -162,6 +172,60 @@ function updateNavigationWithBookmarks(): NavigationUpdateResult {
   return { updated: false, target: null, reason: 'no_site_yml' };
 }
 
+/**
+ * 仅保留有效 HTTP(S) 书签并剪掉因此变空的分类。
+ * 浏览器导出会夹带 chrome://、javascript: 等链接:它们无法在网页中打开,
+ * 写入配置后还会触发后台 /api/seed 的 URL 校验失败(CI 快照契约 400)。
+ * 与 workers 动态导入的 sanitizeHttpUrl 同一策略(共享 sanitizeUrl 白名单 http/https)。
+ */
+function filterHttpSites(categories: BookmarkCategory[]): {
+  categories: BookmarkCategory[];
+  removed: number;
+} {
+  let removed = 0;
+
+  function isHttpUrl(url: string): boolean {
+    const safe = sanitizeUrl(url, { allowedSchemes: ['http', 'https'] });
+    if (safe === null) return false;
+    try {
+      const parsed = new URL(safe);
+      return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+    } catch {
+      return false;
+    }
+  }
+
+  function walk(cats: BookmarkCategory[]): BookmarkCategory[] {
+    const kept: BookmarkCategory[] = [];
+    for (const cat of cats) {
+      const sites = (cat.sites ?? []).filter((site) => {
+        const ok = isHttpUrl(site.url);
+        if (!ok) removed += 1;
+        return ok;
+      });
+      const subcategories = walk(cat.subcategories ?? []);
+      const groups = walk(cat.groups ?? []);
+      const subgroups = walk(cat.subgroups ?? []);
+      const hasContent =
+        sites.length > 0 || subcategories.length > 0 || groups.length > 0 || subgroups.length > 0;
+      if (!hasContent) continue;
+      const next: BookmarkCategory = { ...cat };
+      if (sites.length > 0) next.sites = sites;
+      else delete next.sites;
+      if (subcategories.length > 0) next.subcategories = subcategories;
+      else delete next.subcategories;
+      if (groups.length > 0) next.groups = groups;
+      else delete next.groups;
+      if (subgroups.length > 0) next.subgroups = subgroups;
+      else delete next.subgroups;
+      kept.push(next);
+    }
+    return kept;
+  }
+
+  return { categories: walk(categories), removed };
+}
+
 async function main() {
   const elapsedMs = startTimer();
   log.info('开始', { version: process.env.npm_package_version });
@@ -187,6 +251,21 @@ async function main() {
     }
     log.ok('解析完成', { categories: bookmarks.categories.length });
 
+    const filtered = filterHttpSites(bookmarks.categories);
+    bookmarks.categories = filtered.categories;
+    if (filtered.removed > 0) {
+      log.warn(
+        '已过滤非 HTTP(S) 书签（chrome://、javascript: 等无法在网页中使用，且会被后台校验拒绝）',
+        {
+          removed: filtered.removed,
+        }
+      );
+    }
+    if (bookmarks.categories.length === 0) {
+      log.error('过滤后没有可导入的 HTTP(S) 书签，处理终止（保留现有配置）');
+      return;
+    }
+
     log.info('生成 YAML 配置');
     const yamlContent = generateBookmarksYaml(bookmarks);
     if (!yamlContent) {
@@ -195,12 +274,22 @@ async function main() {
     }
     log.ok('YAML 生成成功');
 
+    // 序列化器输出不符合仓库 prettier 风格（如空串引号）；不格式化会导致 bot 回推配置时
+    // CI 的 format:check:changed 步骤失败。prettier.format 的 filepath 只用于推断 parser，
+    // 不会自动加载配置，需显式合并 resolveConfig 结果
+    const outputPath = path.resolve(MODULAR_OUTPUT_FILE);
+    const prettierOptions = await prettier.resolveConfig(outputPath);
+    const formattedContent = await prettier.format(yamlContent, {
+      ...(prettierOptions ?? {}),
+      filepath: outputPath,
+    });
+
     log.info('写入配置文件', { path: MODULAR_OUTPUT_FILE });
     try {
       ensureUserConfigInitialized();
       if (!fs.existsSync(CONFIG_USER_PAGES_DIR))
         fs.mkdirSync(CONFIG_USER_PAGES_DIR, { recursive: true });
-      fs.writeFileSync(MODULAR_OUTPUT_FILE, yamlContent, 'utf8');
+      fs.writeFileSync(MODULAR_OUTPUT_FILE, formattedContent, 'utf8');
 
       if (!fs.existsSync(MODULAR_OUTPUT_FILE)) {
         throw new FileError('文件未能创建', MODULAR_OUTPUT_FILE, [
@@ -261,3 +350,5 @@ async function main() {
 if (require.main === module) {
   wrapAsyncError(main)();
 }
+
+export { filterHttpSites };
