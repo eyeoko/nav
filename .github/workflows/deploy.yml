@@ -119,7 +119,9 @@ jobs:
             exit 0
           fi
 
-          git commit -m "chore(bookmarks): 导入书签并写回用户配置"
+          # --no-verify: 跳过 husky/lint-staged。CI 里 prettier 重排后若内容与 HEAD 一致，
+          # lint-staged 会报 "Prevented an empty git commit" 并中断整个部署
+          git commit --no-verify -m "chore(bookmarks): 导入书签并写回用户配置"
           git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git" HEAD:${{ github.ref_name }}
       # --- 书签处理步骤结束 ---
 
@@ -207,6 +209,9 @@ jobs:
     steps:
       - name: Setup Pages
         uses: actions/configure-pages@1f0c5cde4bc74cd7e1254d0cb4de8d49e9068c7d # v4
+        with:
+          # 仓库未手动启用 Pages 时自动启用（否则 Get Pages site failed）
+          enablement: true
 
       - name: Deploy to GitHub Pages
         id: deployment
